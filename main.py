@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from flask_cors import CORS
 from routers.classgojp.auth import auth_blueprint  # Updated for Flask Blueprints
 from config import Config  # Import Config class from config.py
@@ -22,6 +22,11 @@ CORS(app, resources={r"/classgojp/*": {"origins": [
 
 # Register Blueprints
 app.register_blueprint(auth_blueprint, url_prefix='/classgojp')  # Register the auth Blueprint
+
+# Simple test route
+@app.route('/', methods=['GET'])
+def get_test0():
+    return jsonify({"cat": "cat not found"})
 
 if __name__ == "__main__":
     app.run()
