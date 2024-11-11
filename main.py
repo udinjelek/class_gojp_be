@@ -17,6 +17,8 @@ CORS(app, resources={r"/classgojp/*": {"origins": [
     "http://127.0.0.1:4001",
     "http://localhost:4200",
     "http://127.0.0.1:4200",
+    "http://localhost:4201",
+    "http://127.0.0.1:4201",
     "https://class-gojp.polaris.my.id",
 ]}})
 
@@ -28,5 +30,5 @@ app.register_blueprint(auth_blueprint, url_prefix='/classgojp')  # Register the 
 def get_test0():
     return jsonify({"cat": "cat not found"})
 
-if __name__ == "__main__":
+if __name__ == "__main__":  
     app.run()
