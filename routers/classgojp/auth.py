@@ -409,6 +409,83 @@ def get_schedule_teacher():
         }
     })
 
+@auth_blueprint.route('/get_schedule_user', methods=['GET'])
+def get_schedule_user():
+    user_id = request.args.get('user_id')
+    
+    # Check for missing parameters
+    if not user_id:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Missing required parameters",
+            "data": None
+        }), 400
+
+    # Query the database for the schedule
+    query = text("""
+        -- Query 1: For "learning with sensai" (student perspective)
+        SELECT 
+            DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date,
+            hm.hour_ampm AS schedule_hour,
+            cs.hour_id AS hm_id,
+            c.name AS course_name,
+            c.type_class AS course_type,
+            c.description AS course_description,
+            ce.user_id AS student_user_id,
+            u.full_name as teacher_name,
+            'Learning with Sensai' AS criteria
+        FROM course_enrollments ce
+        JOIN courses c ON c.id = ce.course_id
+        JOIN course_schedules cs ON cs.course_id = c.id
+        JOIN hour_mapping hm on hm.id = cs.hour_id 
+        left JOIN users u on u.user_id = c.teacher_id
+        WHERE 
+            ce.user_id = :user_id
+            AND cs.date >= CURRENT_DATE
+            AND cs.is_deleted = FALSE
+            AND c.is_deleted = FALSE
+            AND ce.is_deleted = FALSE
+        UNION
+        -- Query 2: For "teaching private / group" (teacher perspective)
+        SELECT 
+            DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date,
+            hm.hour_ampm AS schedule_hour,
+            cs.hour_id AS hm_id,
+            c.name AS course_name,
+            c.type_class AS course_type,
+            c.description AS course_description,
+            c.teacher_id AS teacher_user_id,
+            u.full_name as teacher_name,
+            'Teaching Private/Group' AS criteria
+        FROM courses c
+        JOIN course_schedules cs ON cs.course_id = c.id
+        JOIN hour_mapping hm on hm.id = cs.hour_id
+        left JOIN users u on u.user_id = c.teacher_id 
+        WHERE 
+            c.teacher_id = :user_id
+            AND cs.date >= CURRENT_DATE
+            AND cs.is_deleted = FALSE
+            AND c.is_deleted = FALSE
+        -- Final ordering by date and hour
+        ORDER BY 
+            schedule_date, hm_id;
+    """)
+    result = db_use.session.execute(query, {"user_id":user_id}).mappings().all()
+
+    
+    # Convert results to JSON-serializable format
+    schedule = [dict(row) for row in result]
+    
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "Schedule retrieved successfully",
+        "data": {"schedule" : schedule
+        }
+    })
+
+
 @auth_blueprint.route('/set_unavailable_schedule', methods=['POST'])
 def set_unavailable_schedule():
     data = request.get_json()
@@ -587,6 +664,7 @@ def create_course_bystudent():
         date = data.get('date')
         hour_id = data.get('hour_id')
         type_class = data.get('type_class')
+        name = data.get('name')
         member_slots = 1 # default private
         description = 'Private' # default private
 
@@ -600,14 +678,15 @@ def create_course_bystudent():
 
         # Insert into courses table
         insert_course_query = text("""
-            INSERT INTO courses (created_by, teacher_id, type_class, member_slots, description) 
-            VALUES (:student_id, :teacher_id, :type_class, :member_slots, :description)
+            INSERT INTO courses (created_by, teacher_id, type_class, member_slots, name, description) 
+            VALUES (:student_id, :teacher_id, :type_class, :member_slots, :name, :description)
         """)
         db_use.session.execute(insert_course_query, {
             "student_id": student_id,
             "teacher_id": teacher_id,
             "type_class" : type_class,
             "member_slots": member_slots,
+            "name":name,
             "description": description
         })
         db_use.session.commit()
