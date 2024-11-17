@@ -432,8 +432,11 @@ def get_schedule_user():
             c.name AS course_name,
             c.type_class AS course_type,
             c.description AS course_description,
-            ce.user_id AS student_user_id,
+            c.teacher_id AS teacher_user_id,
+            c.member_slots,
+            c.id as course_id,
             u.full_name as teacher_name,
+            concat( :address_storage , u.profile_pic) as teacher_profile_pic,
             'Learning with Sensai' AS criteria
         FROM course_enrollments ce
         JOIN courses c ON c.id = ce.course_id
@@ -456,8 +459,11 @@ def get_schedule_user():
             c.type_class AS course_type,
             c.description AS course_description,
             c.teacher_id AS teacher_user_id,
+            c.member_slots,
+            c.id as course_id,
             u.full_name as teacher_name,
-            'Teaching Private/Group' AS criteria
+            concat( :address_storage , u.profile_pic) as teacher_profile_pic,
+            'Teaching' AS criteria
         FROM courses c
         JOIN course_schedules cs ON cs.course_id = c.id
         JOIN hour_mapping hm on hm.id = cs.hour_id
@@ -471,17 +477,67 @@ def get_schedule_user():
         ORDER BY 
             schedule_date, hm_id;
     """)
-    result = db_use.session.execute(query, {"user_id":user_id}).mappings().all()
+    result = db_use.session.execute(query, {"user_id":user_id , "address_storage": address_storage}).mappings().all()
 
-    
+    course_id_arr = [row['course_id'] for row in result if 'course_id' in row]
+    if course_id_arr:
+        next_query = text("""
+            SELECT 
+                ce_data.course_id, 
+                c.member_slots,          
+                ce_data.count_member,
+                ce_data.student_id,
+                COALESCE(u.full_name, '') AS student_name,
+                CASE 
+                        WHEN COALESCE(u.profile_pic, '') = '' THEN ''
+                        ELSE concat(:address_storage, u.profile_pic)
+                END AS student_profile_pic
+            FROM (
+                SELECT 
+                    ce.course_id,
+                    COUNT(ce.user_id) AS count_member,
+                    CASE 
+                        WHEN COUNT(ce.user_id) = 1 THEN MAX(ce.user_id)
+                        ELSE 0
+                    END AS student_id
+                FROM course_enrollments AS ce
+                WHERE 
+                    ce.status = 'active'
+                    AND ce.is_deleted = FALSE
+                    AND ce.course_id IN :course_id_arr
+                GROUP BY 
+                    ce.course_id
+            ) AS ce_data
+            JOIN courses AS c ON c.id = ce_data.course_id
+            LEFT JOIN users AS u ON u.user_id = ce_data.student_id
+            WHERE 
+                c.is_deleted = FALSE
+                ;
+
+        """)
+
+        # Execute the next query with the extracted course_id array
+        result_count_member_class = db_use.session.execute(next_query, {"course_id_arr": tuple(course_id_arr),"address_storage":address_storage}).mappings().all()
+        
+    else:
+        return jsonify({
+                "status": False,
+                "status_code": 401,
+                "message": "member class not found",
+                "data": None
+            }), 401
+
     # Convert results to JSON-serializable format
     schedule = [dict(row) for row in result]
-    
+    count_member_class = [dict(row) for row in result_count_member_class]
+
     return jsonify({
         "status": True,
         "status_code": 200,
         "message": "Schedule retrieved successfully",
-        "data": {"schedule" : schedule
+        "data": {   "schedule" : schedule
+                 ,  "count_member_class":count_member_class
+                 
         }
     })
 
