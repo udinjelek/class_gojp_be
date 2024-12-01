@@ -2,12 +2,15 @@ import uuid
 import hashlib
 import random
 from flask import Blueprint, request, jsonify
+from flask_mail import Message
+from app.mail import mail
 from sqlalchemy import text
 from db import db_use  # Import SQLAlchemy instance
 from datetime import datetime
 
-auth_blueprint = Blueprint('auth', __name__)
+api_blueprint = Blueprint('auth', __name__)
 address_storage = 'https://classgojp-file.polaris.my.id/'
+
 
 # Function to generate a shortened UUID
 def generate_short_uuid():
@@ -23,7 +26,7 @@ def generate_random_caticon():
     return f"images/default/caticon{random_number}.jpg"
 
 # Route for creating a new user
-@auth_blueprint.route('/create_user', methods=['POST'])
+@api_blueprint.route('/create_user', methods=['POST'])
 def create_user():
     data = request.get_json()
     full_name = data.get('full_name')
@@ -86,7 +89,7 @@ def create_user():
         "data": dict(result)  # Convert SQLAlchemy row to a dictionary
     })
 
-@auth_blueprint.route("/user_login", methods=["POST"])
+@api_blueprint.route("/user_login", methods=["POST"])
 def user_login():
     data = request.get_json()
     email = data.get("email")
@@ -119,7 +122,7 @@ def user_login():
         }), 401
 
 # Test route for database
-@auth_blueprint.route('/testdb', methods=['GET'])
+@api_blueprint.route('/testdb', methods=['GET'])
 def get_user_by_idx():
     params_id = '80b78ea3'
     query = text("SELECT * FROM users WHERE user_id = :id")
@@ -131,11 +134,11 @@ def get_user_by_idx():
         return jsonify({"error": "User not found"}), 404
 
 # Simple test route
-@auth_blueprint.route('/test', methods=['GET'])
+@api_blueprint.route('/test', methods=['GET'])
 def get_test():
     return jsonify({"error": "User not found"})
 
-@auth_blueprint.route('/get_list_days_hours', methods=['GET'])
+@api_blueprint.route('/get_list_days_hours', methods=['GET'])
 def get_list_days_hours():
     query_hours = text("SELECT * FROM hour_mapping WHERE is_deleted = false order by id")
     result_hours = db_use.session.execute(query_hours).mappings().all()  # Retrieve all rows with .mappings()
@@ -165,7 +168,7 @@ def get_list_days_hours():
                     }
         })
 
-@auth_blueprint.route('/load_weekly_schedule_template', methods=['GET'])
+@api_blueprint.route('/load_weekly_schedule_template', methods=['GET'])
 def load_weekly_schedule_template():
     # Get the user_id from the request arguments
     user_id = request.args.get('user_id')
@@ -204,7 +207,7 @@ def load_weekly_schedule_template():
         }
     }), 200
 
-@auth_blueprint.route('/save_weekly_schedule_template', methods=['POST'])
+@api_blueprint.route('/save_weekly_schedule_template', methods=['POST'])
 def save_weekly_schedule_template():
     data = request.get_json()
     user_id = data.get("user_id")
@@ -255,13 +258,17 @@ def save_weekly_schedule_template():
             "error": str(e)
         }), 500
     
-@auth_blueprint.route('/get_schedule_teacher', methods=['GET'])
+@api_blueprint.route('/get_schedule_teacher', methods=['GET'])
 def get_schedule_teacher():
     teacher_id = request.args.get('teacher_id')
     student_id = request.args.get('student_id')
     formatted_date = request.args.get('formattedDate')  # might need this later
     day_of_week = request.args.get('dayOfWeek')
-    show_unavailable = request.args.get('showUnavailable')
+    show_unavailable_arg = request.args.get('showUnavailable')
+    if show_unavailable_arg in ['false', False]:
+        show_unavailable = 0
+    else:
+        show_unavailable = 1
 
     # Check for missing parameters
     if not teacher_id or not day_of_week or not formatted_date :
@@ -297,8 +304,12 @@ def get_schedule_teacher():
                 hm.hour_24,
                 booked_data.course_id,
                 CASE
-                    WHEN booked_data.status is not null THEN booked_data.status
-                    WHEN unavail_data.status is not null and :show_unavailable = true THEN unavail_data.status
+                    WHEN booked_data.status is not null THEN 
+                        case 
+                            when booked_data.type != 'in session' then booked_data.status
+                            else booked_data.type
+                        end
+                    WHEN unavail_data.status is not null and :show_unavailable = 1 THEN unavail_data.status
                     WHEN avail_data.status is not null THEN avail_data.status
                     ELSE ''
                 end status,
@@ -311,7 +322,7 @@ def get_schedule_teacher():
         from hour_mapping hm
         -- left join dengan course yg status nya sudah di booked
         left join 	(
-                        select :teacher_id teacher_id, :formatted_date as date,  hm.id ,  hm.hour_ampm , hm.hour_24 , 'Booked' status, c.member_slots, ce_count.count_member, ce.status as member_status, cs.course_id
+                        select :teacher_id teacher_id, :formatted_date as date,  hm.id ,  hm.hour_ampm , hm.hour_24 , 'Booked' status, c.member_slots, ce_count.count_member, ce.status as member_status, cs.type , cs.course_id
                         from hour_mapping hm 
                         -- inner join dengan course_schedules, untuk memastikan hari dan jam nya match dengan query
                         inner join course_schedules as cs
@@ -368,12 +379,16 @@ def get_schedule_teacher():
         -- left join dengan 
         left join day_mapping dm 
         on dm.id = :day_id
-        where booked_data.id is not null 
-        or ( avail_data.id is not null and unavail_data.id is null and :show_unavailable = FALSE )
-        or ( ( 	avail_data.id is not null or 
-                unavail_data.id is not null
-            ) 	and :show_unavailable = true
-        )
+        where 
+            :show_unavailable = 1
+            or  (   :show_unavailable = 0
+                     and	(  	booked_data.id is not null 
+                            or 
+                            (	avail_data.id is not null 
+                                and unavail_data.id is null
+                            )	
+                )
+            )
         order by hm.id
     """)
     result = db_use.session.execute(query, {"teacher_id":teacher_id , "formatted_date": formatted_date, "show_unavailable":show_unavailable , "student_id": student_id, "day_id": day_id  }).mappings().all()
@@ -406,10 +421,88 @@ def get_schedule_teacher():
                  ,  "hours": hours
                  ,  "days": days
                  , "day_of_week" : day_of_week
+                 , 'show_unavailable': show_unavailable
         }
     })
 
-@auth_blueprint.route('/get_schedule_user', methods=['GET'])
+@api_blueprint.route('/get_schedule_teacher_ignore_weekly_template', methods=['GET'])
+def get_schedule_teacher_ignore_weekly_template():
+    teacher_id = request.args.get('teacher_id')
+    formatted_date = request.args.get('formattedDate')  # might need this later
+    day_of_week = request.args.get('dayOfWeek')
+    show_unavailable_arg = request.args.get('showUnavailable')
+    if show_unavailable_arg in ['false', False]:
+        show_unavailable = 0
+    else:
+        show_unavailable = 1
+
+    # Check for missing parameters
+    if not teacher_id or not day_of_week or not formatted_date :
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Missing required parameters",
+            "data": None
+        }), 400
+
+
+
+    # Query the database for the schedule
+    query = text("""
+        select hm.id as hm_id, hm.*,
+                case 
+                    when cs.id is not null then 'Booked'
+                    when us.id is not null then 'Unavailable'
+                    else 'Available'
+                end as status,
+                case 
+                    when cs.id is not null then cs.type
+                    when us.id is not null then us.status
+                    else 'Available'
+                end as type
+        from hour_mapping hm 
+        left join (	select * 
+                    from unavailable_schedules 
+                    where date = :formatted_date
+                    and teacher_id = :teacher_id
+                    and is_deleted = false
+                    ) as us
+        on hm.id = us.hour_id
+        left join (	select cs.* , c.teacher_id, c.name, c.type_class 
+                    from course_schedules cs 
+                    inner join courses c 
+                    on cs.course_id = c.id
+                    where date = :formatted_date
+                    and teacher_id = :teacher_id
+                    and cs.is_deleted = false
+                    and c.is_deleted = false
+                    ) as cs
+        on hm.id = cs.hour_id
+        where :show_unavailable = TRUE
+        order by hm.id
+    """)
+    result = db_use.session.execute(query, {"teacher_id":teacher_id , "formatted_date": formatted_date, "show_unavailable":show_unavailable }).mappings().all()
+
+    
+    if not result:
+        return jsonify({
+                "status": False,
+                "status_code": 401,
+                "message": "Data no found",
+                "data": None
+            }), 401
+    
+    # Convert results to JSON-serializable format
+    schedule = [dict(row) for row in result]
+    
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "Schedule retrieved successfully",
+        "data": {"schedule" : schedule}
+    })
+
+@api_blueprint.route('/get_schedule_user', methods=['GET'])
 def get_schedule_user():
     user_id = request.args.get('user_id')
     
@@ -542,7 +635,7 @@ def get_schedule_user():
     })
 
 
-@auth_blueprint.route('/set_unavailable_schedule', methods=['POST'])
+@api_blueprint.route('/set_unavailable_schedule', methods=['POST'])
 def set_unavailable_schedule():
     data = request.get_json()
     teacher_id = data.get('teacher_id')
@@ -609,7 +702,7 @@ def set_unavailable_schedule():
                 "data": None
             }), 404
         
-@auth_blueprint.route('/get_list_teachers', methods=['GET'])
+@api_blueprint.route('/get_list_teachers', methods=['GET'])
 def get_list_teachers():
     # SQL query to join users and user_profiles where the role is 'teacher'
     query = text("""
@@ -643,7 +736,7 @@ def get_list_teachers():
             "data": []
         }), 404
     
-@auth_blueprint.route('/get_detail_teacher', methods=['GET'])
+@api_blueprint.route('/get_detail_teacher', methods=['GET'])
 def get_detail_teacher():
     # Get the user_id from request parameters
     user_id = request.args.get('id')
@@ -710,7 +803,7 @@ def get_detail_teacher():
         "data": user_id
     })
 
-@auth_blueprint.route('/create_course_bystudent', methods=['POST'])
+@api_blueprint.route('/create_course_bystudent', methods=['POST'])
 def create_course_bystudent():
     try:
         # Get parameters from request
@@ -722,6 +815,7 @@ def create_course_bystudent():
         type_class = data.get('type_class')
         name = data.get('name')
         member_slots = 1 # default private
+        duration = data.get('duration')
         description = 'Private' # default private
 
         if not all([student_id, teacher_id, date, hour_id]):
@@ -752,14 +846,29 @@ def create_course_bystudent():
 
         # Insert into course_schedules table
         insert_schedule_query = text("""
-            INSERT INTO course_schedules (course_id, date, hour_id)
-            VALUES (:course_id, :date, :hour_id)
+            INSERT INTO course_schedules (course_id, date, hour_id, duration, type)
+            VALUES (:course_id, :date, :hour_id, :duration, 'scheduled')
         """)
         db_use.session.execute(insert_schedule_query, {
             "course_id": course_id,
             "date": date,
-            "hour_id": hour_id
+            "hour_id": hour_id,
+            "duration": duration
         })
+
+        # Calculate and insert 'in session' entries
+        in_session_query = text("""
+            INSERT INTO course_schedules (course_id, date, hour_id, duration, type)
+            VALUES (:course_id, :date, :hour_id, 0, 'in session')
+        """)
+
+        # Generate the additional 'in session' entries
+        for offset in range(30, duration, 30):  # Increment by 30 minutes
+            db_use.session.execute(in_session_query, {
+                "course_id": course_id,
+                "date": date,
+                "hour_id": hour_id + offset
+            })
         db_use.session.commit()
 
         # Insert into course_enrollments table
@@ -791,7 +900,7 @@ def create_course_bystudent():
             "data": None
         }), 500
 
-@auth_blueprint.route('/get_detail_course', methods=['GET'])
+@api_blueprint.route('/get_detail_course', methods=['GET'])
 def get_detail_course():
     # Get the course_id from the request arguments
     course_id = request.args.get('course_id')
@@ -858,3 +967,29 @@ def get_detail_course():
             "member_list": member_list
         }
     })
+
+def send_email(subject, sender, recipients, body):
+    try:
+        msg = Message(subject=subject, sender=sender, recipients=recipients, body=body)
+        mail.send(msg)
+    except Exception as e:
+        print("Failed to send email:", e)
+        return jsonify({"status": False, "message": "Failed to send email"}), 500
+    
+
+@api_blueprint.route('/send-test-email', methods=['GET'])
+def send_test_email():
+    try:
+        # Define email details
+        recipient = 'ganip.xra@gmail.com'
+        subject = 'Test Send Email'
+        body = 'Hello World'
+
+        # Create email message
+        msg = Message(subject=subject, recipients=[recipient], body=body)
+
+        # Send email
+        mail.send(msg)
+        return jsonify({"status": True, "message": f"Test email sent to {recipient}."})
+    except Exception as e:
+        return jsonify({"status": False, "message": "Failed to send email", "error": str(e)}), 500
