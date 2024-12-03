@@ -522,6 +522,7 @@ def get_schedule_user():
             DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date,
             hm.hour_ampm AS schedule_hour,
             cs.hour_id AS hm_id,
+            cs.duration,
             c.name AS course_name,
             c.type_class AS course_type,
             c.description AS course_description,
@@ -542,12 +543,14 @@ def get_schedule_user():
             AND cs.is_deleted = FALSE
             AND c.is_deleted = FALSE
             AND ce.is_deleted = FALSE
+            AND cs.type != 'in session'
         UNION
         -- Query 2: For "teaching private / group" (teacher perspective)
         SELECT 
             DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date,
             hm.hour_ampm AS schedule_hour,
             cs.hour_id AS hm_id,
+            cs.duration,
             c.name AS course_name,
             c.type_class AS course_type,
             c.description AS course_description,
@@ -566,6 +569,7 @@ def get_schedule_user():
             AND cs.date >= CURRENT_DATE
             AND cs.is_deleted = FALSE
             AND c.is_deleted = FALSE
+            AND cs.type != 'in session'
         -- Final ordering by date and hour
         ORDER BY 
             schedule_date, hm_id;
@@ -588,7 +592,7 @@ def get_schedule_user():
             FROM (
                 SELECT 
                     ce.course_id,
-                    COUNT(ce.user_id) AS count_member,
+                    COALESCE(COUNT(ce.user_id),0) AS count_member,
                     CASE 
                         WHEN COUNT(ce.user_id) = 1 THEN MAX(ce.user_id)
                         ELSE 0
@@ -993,3 +997,109 @@ def send_test_email():
         return jsonify({"status": True, "message": f"Test email sent to {recipient}."})
     except Exception as e:
         return jsonify({"status": False, "message": "Failed to send email", "error": str(e)}), 500
+    
+@api_blueprint.route('/create_custom_course', methods=['POST'])
+def create_custom_course():
+    try:
+        # Get parameters from request
+        data = request.json
+        user_id = data.get('user_id')
+        teacher_id = data.get('teacher_id')
+        name = data.get('course_name')
+        member_slots = data.get('max_participants')
+        course_schedule = data.get('course_schedule')
+        
+        
+        description = 'Group' # default private
+        type_class = 'Group' # default private
+
+        if not all([name, teacher_id, member_slots, course_schedule]):
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+
+        # Insert into courses table
+        insert_course_query = text("""
+            INSERT INTO courses (created_by, teacher_id, type_class, member_slots, name, description) 
+            VALUES (:user_id, :teacher_id, :type_class, :member_slots, :name, :description)
+        """)
+        db_use.session.execute(insert_course_query, {
+            "user_id": user_id,
+            "teacher_id": teacher_id,
+            "type_class" : type_class,
+            "member_slots": member_slots,
+            "name":name,
+            "description": description
+        })
+        # db_use.session.commit()
+
+        # Get the last inserted course_id
+        course_id = db_use.session.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+
+        for schedule in course_schedule:
+            date = schedule.get('date')
+            hour_id = schedule.get('hm_id')
+            duration = schedule.get('duration')
+            
+            # Insert the main scheduled entry
+            insert_schedule_query = text("""
+                INSERT INTO course_schedules (course_id, date, hour_id, duration, type)
+                VALUES (:course_id, :date, :hour_id, :duration, 'scheduled')
+            """)
+            db_use.session.execute(insert_schedule_query, {
+                "course_id": course_id,
+                "date": date,
+                "hour_id": hour_id,
+                "duration": duration
+            })
+            
+            # Insert the 'in session' entries
+            in_session_query = text("""
+                INSERT INTO course_schedules (course_id, date, hour_id, duration, type)
+                VALUES (:course_id, :date, :hour_id, 0, 'in session')
+            """)
+            
+            # Generate additional 'in session' entries incremented by 30 minutes
+            for offset in range(30, int(duration), 30):  # Increment by 30 minutes
+                db_use.session.execute(in_session_query, {
+                    "course_id": course_id,
+                    "date": date,
+                    "hour_id": hour_id + offset
+                })
+        
+        
+        
+
+        ## Insert into course_enrollments table -- disable for now
+        # insert_enrollment_query = text("""
+        #     INSERT INTO course_enrollments (course_id, user_id, status)
+        #     VALUES (:course_id, :user_id, 'active')
+        # """)
+        # db_use.session.execute(insert_enrollment_query, {
+        #     "course_id": course_id,
+        #     "user_id": student_id
+        # })
+        
+        # Commit the transaction after processing all schedules
+        db_use.session.commit()
+
+        return jsonify({
+            "status": True,
+            "status_code": 201,
+            "message": "Course created and associated records inserted successfully",
+            "data": {
+                "course_id": course_id
+            }
+        })
+
+    except Exception as e:
+        db_use.session.rollback()
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
