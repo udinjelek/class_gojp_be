@@ -1,6 +1,7 @@
 import uuid
 import hashlib
 import random
+import time
 from flask import Blueprint, request, jsonify
 from flask_mail import Message
 from app.mail import mail
@@ -15,6 +16,24 @@ address_storage = 'https://classgojp-file.polaris.my.id/'
 # Function to generate a shortened UUID
 def generate_short_uuid():
     return str(uuid.uuid4())[:8]
+
+def generate_time_short_uuid():
+    unix_time = int(time.time())  # Current Unix timestamp
+    base36_time = base36_encode(unix_time)  # Convert timestamp to Base36
+    random_uuid = str(uuid.uuid4())[:8]  # First 8 characters of UUID
+    return f"{base36_time}-{random_uuid}"
+
+def base36_encode(number):
+    """Encodes an integer into a Base36 string."""
+    if number < 0:
+        raise ValueError("Base36 encoding only supports non-negative integers.")
+    
+    chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+    result = ""
+    while number > 0:
+        number, remainder = divmod(number, 36)
+        result = chars[remainder] + result
+    return result or "0"
 
 def hash_password_md5(password: str) -> str:
     # Encode the password to bytes, then hash it using MD5
@@ -743,17 +762,18 @@ def get_list_teachers():
 @api_blueprint.route('/get_detail_teacher', methods=['GET'])
 def get_detail_teacher():
     # Get the user_id from request parameters
-    user_id = request.args.get('id')
+    user_id = request.args.get('user_id')
+    teacher_id = request.args.get('teacher_id')
     
-    if not user_id:
+    if not teacher_id:
         return jsonify({
             "status": False,
             "status_code": 400,
-            "message": "Missing required parameter 'id'",
+            "message": "Missing required parameter 'teacher_id'",
             "data": None
         }), 400
 
-    query = text("""
+    query_profile = text("""
         SELECT 
             concat(:address_storage, u.profile_pic) as profile_pic,
             u.full_name AS name,
@@ -764,11 +784,11 @@ def get_detail_teacher():
             up.message
         FROM users u
         LEFT JOIN user_profiles up ON u.user_id = up.user_id
-        WHERE u.user_id = :user_id
+        WHERE u.user_id = :teacher_id
     """)
-    result = db_use.session.execute(query, {"user_id": user_id, "address_storage":address_storage}).mappings().fetchone()
+    result_profile = db_use.session.execute(query_profile, {"teacher_id": teacher_id, "address_storage":address_storage}).mappings().fetchone()
     
-    if not result:
+    if not result_profile:
         return jsonify({
             "status": False,
             "status_code": 404,
@@ -776,36 +796,45 @@ def get_detail_teacher():
             "data": None
         }), 404
     
+    query_list_group_courses = text("""
+        select 
+            COALESCE (ce.total,0) current_join , c.name, c.description, c.type_class, c.status, c.member_slots, c.id, c.created_at, cs.total_class  
+        from courses c
+        inner join 
+        (	select 
+                course_id, count(*) total_class from course_schedules cs
+            where type = 'scheduled'  
+                and is_deleted = 0
+            group by course_id
+        )	cs 
+        on cs.course_id = c.id 
+        left JOIN 
+        (   select 
+                DISTINCT count(user_id) as total , course_id from course_enrollments ce 
+            where is_deleted = 0
+            GROUP by course_id
+        ) ce
+        on ce.course_id = c.id 
+        where c.teacher_id = :teacher_id
+            and c.type_class = 'Group'
+            and c.is_deleted  = 0
+    """)
+    result_list_group_courses = db_use.session.execute(query_list_group_courses, {"teacher_id": teacher_id}).mappings().fetchall()
+    
+    # Convert RowMapping objects to dictionaries
+    profile_data = dict(result_profile) if result_profile else None
+    list_group_courses_data = [dict(row) for row in result_list_group_courses] if result_list_group_courses else []
 
     return jsonify({
         "status": True,
         "status_code": 200,
         "message": "Teacher details retrieved successfully",
-        "data": dict(result)
+        "data": {
+                "profile": profile_data,
+                "listGroupCourses": list_group_courses_data
+            }
     })
-    # Query to join users and user_profiles and get the specified fields
     
-
-    
-
-    # Convert the result to a dictionary safely
-    try:
-        data = dict(result)  # Using dict() to convert row object
-    except TypeError:
-        # Handle if result cannot be converted (e.g., result is None)
-        return jsonify({
-            "status": False,
-            "status_code": 500,
-            "message": "Unexpected data structure returned",
-            "data": None
-        }), 500
-
-    return jsonify({
-        "status": True,
-        "status_code": 200,
-        "message": "Teacher details retrieved successfully",
-        "data": user_id
-    })
 
 @api_blueprint.route('/create_course_bystudent', methods=['POST'])
 def create_course_bystudent():
@@ -821,6 +850,7 @@ def create_course_bystudent():
         member_slots = 1 # default private
         duration = data.get('duration')
         description = 'Private' # default private
+        id = generate_time_short_uuid()
 
         if not all([student_id, teacher_id, date, hour_id]):
             return jsonify({
@@ -832,10 +862,11 @@ def create_course_bystudent():
 
         # Insert into courses table
         insert_course_query = text("""
-            INSERT INTO courses (created_by, teacher_id, type_class, member_slots, name, description) 
-            VALUES (:student_id, :teacher_id, :type_class, :member_slots, :name, :description)
+            INSERT INTO courses (id, created_by, teacher_id, type_class, member_slots, name, description) 
+            VALUES (:id, :student_id, :teacher_id, :type_class, :member_slots, :name, :description)
         """)
         db_use.session.execute(insert_course_query, {
+            "id":id,
             "student_id": student_id,
             "teacher_id": teacher_id,
             "type_class" : type_class,
@@ -846,7 +877,7 @@ def create_course_bystudent():
         db_use.session.commit()
 
         # Get the last inserted course_id
-        course_id = db_use.session.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+        course_id = id
 
         # Insert into course_schedules table
         insert_schedule_query = text("""
@@ -980,7 +1011,6 @@ def send_email(subject, sender, recipients, body):
         print("Failed to send email:", e)
         return jsonify({"status": False, "message": "Failed to send email"}), 500
     
-
 @api_blueprint.route('/send-test-email', methods=['GET'])
 def send_test_email():
     try:
@@ -1008,7 +1038,7 @@ def create_custom_course():
         name = data.get('course_name')
         member_slots = data.get('max_participants')
         course_schedule = data.get('course_schedule')
-        
+        id = generate_time_short_uuid()
         
         description = 'Group' # default private
         type_class = 'Group' # default private
@@ -1023,10 +1053,11 @@ def create_custom_course():
 
         # Insert into courses table
         insert_course_query = text("""
-            INSERT INTO courses (created_by, teacher_id, type_class, member_slots, name, description) 
-            VALUES (:user_id, :teacher_id, :type_class, :member_slots, :name, :description)
+            INSERT INTO courses (id, created_by, teacher_id, type_class, member_slots, name, description) 
+            VALUES (:id, :user_id, :teacher_id, :type_class, :member_slots, :name, :description)
         """)
         db_use.session.execute(insert_course_query, {
+            "id":id,
             "user_id": user_id,
             "teacher_id": teacher_id,
             "type_class" : type_class,
@@ -1037,7 +1068,7 @@ def create_custom_course():
         # db_use.session.commit()
 
         # Get the last inserted course_id
-        course_id = db_use.session.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+        course_id = id
 
         for schedule in course_schedule:
             date = schedule.get('date')
@@ -1094,6 +1125,173 @@ def create_custom_course():
                 "course_id": course_id
             }
         })
+
+    except Exception as e:
+        db_use.session.rollback()
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+    
+@api_blueprint.route('/get_list_group_courses', methods=['GET'])
+def get_list_group_courses():
+    # Get the course_id from the request arguments
+    teacher_id = request.args.get('teacher_id')
+
+    if not all([teacher_id]):
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+    
+    list_query = text("""   select COALESCE (ce.total,0) current_join , c.name, c.description, c.type_class, c.status, c.member_slots  from courses c
+                            inner join 
+                            (	select DISTINCT course_id from course_schedules cs 
+                                where type = 'scheduled'  
+                                and is_deleted = 0
+                            )	cs 
+                            on cs.course_id = c.id 
+                            left JOIN 
+                            (   select DISTINCT count(user_id) as total , course_id from course_enrollments ce 
+                                where is_deleted = 0
+                                GROUP by course_id
+                            ) as ce
+                            on ce.course_id = c.id 
+                            where c.teacher_id = :teacher_id
+                            and c.type_class = 'Group'
+                            and c.is_deleted  = 0
+                            """)
+    list_result = db_use.session.execute(list_query, {"teacher_id": teacher_id,"address_storage": address_storage}).mappings().all()
+    course_list = [dict(row) for row in list_result] if list_result else []
+
+    # Return response
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "Course details retrieved successfully",
+        "data": {
+            "course_list": course_list
+        }
+    })
+
+@api_blueprint.route('/get_schedule_group_course', methods=['GET'])
+def get_schedule_group_course():
+    # Get the course_id from the request arguments
+    course_id = request.args.get('course_id')
+
+    if not all([course_id]):
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+    
+    list_query = text("""   SELECT DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date , cs.hour_id, cs.duration,cs.type, hm.hour_ampm, hm.hour_24  
+                            FROM course_schedules cs 
+                            left join hour_mapping hm 
+                                on hm.id =cs.hour_id 
+                            where course_id = :course_id
+                                and type = 'scheduled'
+                                and cs.is_deleted  = 0
+                            order by date, hour_id 
+                            """)
+    list_result = db_use.session.execute(list_query, {"course_id": course_id}).mappings().all()
+    course_list = [dict(row) for row in list_result] if list_result else []
+
+    # Return response
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "Course details retrieved successfully",
+        "data": course_list
+    })
+
+@api_blueprint.route('/join_course', methods=['POST'])
+def join_course():
+    try:
+        # Get parameters from request
+        data = request.json
+        student_id = data.get('student_id')
+        course_id = data.get('course_id')
+
+        if not all([student_id, course_id]):
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+
+        # Check if the student is already enrolled in the course
+        check_enrollment_query = text("""
+            SELECT COUNT(*) AS count
+            FROM course_enrollments
+            WHERE user_id = :student_id 
+              AND course_id = :course_id 
+              AND is_deleted = 0
+        """)
+        result = db_use.session.execute(check_enrollment_query, {
+            "student_id": student_id,
+            "course_id": course_id
+        }).fetchone()
+
+        if result.count > 0:
+            return jsonify({
+                "status": False,
+                "status_code": 409,
+                "message": "User already exists in this class",
+                "data": None
+            }), 409
+
+        # Check the current number of enrolled students
+        check_member_slots_query = text("""
+            SELECT COUNT(*) AS enrolled_count, c.member_slots
+            FROM course_enrollments ce
+            INNER JOIN courses c ON c.id = ce.course_id
+            WHERE ce.course_id = :course_id AND ce.is_deleted = 0
+            GROUP BY c.member_slots
+        """)
+        enrollment_result = db_use.session.execute(check_member_slots_query, {
+            "course_id": course_id
+        }).fetchone()
+
+        # Extract results for comparison
+        enrolled_count = enrollment_result.enrolled_count if enrollment_result else 0
+        member_slots = enrollment_result.member_slots if enrollment_result else 0
+
+        if enrolled_count >= member_slots:
+            return jsonify({
+                "status": False,
+                "status_code": 409,
+                "message": "Course is already full",
+                "data": None
+            }), 409
+
+        # Enroll the student into the course
+        insert_enrollment_query = text("""
+            INSERT INTO course_enrollments (course_id, user_id, status, is_deleted)
+            VALUES (:course_id, :student_id, 'active', 0)
+        """)
+        db_use.session.execute(insert_enrollment_query, {
+            "course_id": course_id,
+            "student_id": student_id
+        })
+        db_use.session.commit()
+
+        return jsonify({
+            "status": True,
+            "status_code": 201,
+            "message": "User successfully joined the course",
+            "data": {
+                "course_id": course_id,
+                "user_id": student_id
+            }
+        }), 201
 
     except Exception as e:
         db_use.session.rollback()
