@@ -1227,6 +1227,24 @@ def join_course():
                 "data": None
             }), 400
 
+        # Check if the student is the teacher of the course
+        check_teacher_query = text("""
+            SELECT teacher_id 
+            FROM courses 
+            WHERE id = :course_id
+        """)
+        teacher_result = db_use.session.execute(check_teacher_query, {
+            "course_id": course_id
+        }).fetchone()
+
+        if teacher_result and teacher_result.teacher_id == student_id:
+            return jsonify({
+                "status": False,
+                "status_code": 403,
+                "message": "Teachers are not allowed to enroll as students in their own courses.",
+                "data": None
+            }), 403
+
         # Check if the student is already enrolled in the course
         check_enrollment_query = text("""
             SELECT COUNT(*) AS count
@@ -1244,7 +1262,7 @@ def join_course():
             return jsonify({
                 "status": False,
                 "status_code": 409,
-                "message": "User already exists in this class",
+                "message": "User is already enrolled in this class.",
                 "data": None
             }), 409
 
@@ -1268,7 +1286,7 @@ def join_course():
             return jsonify({
                 "status": False,
                 "status_code": 409,
-                "message": "Course is already full",
+                "message": "The course has reached its maximum capacity.",
                 "data": None
             }), 409
 
@@ -1286,7 +1304,7 @@ def join_course():
         return jsonify({
             "status": True,
             "status_code": 201,
-            "message": "User successfully joined the course",
+            "message": "User successfully enrolled in the course.",
             "data": {
                 "course_id": course_id,
                 "user_id": student_id
