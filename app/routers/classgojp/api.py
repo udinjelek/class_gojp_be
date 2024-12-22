@@ -334,6 +334,7 @@ def get_schedule_teacher():
                 end status,
                 coalesce(booked_data.member_slots , 0) as member_slots,
                 coalesce(booked_data.count_member,0) as count_member, 
+                coalesce(booked_data.name,'') as name,  
                 CASE
                     WHEN booked_data.member_status is not null then true
                     ELSE false
@@ -341,7 +342,7 @@ def get_schedule_teacher():
         from hour_mapping hm
         -- left join dengan course yg status nya sudah di booked
         left join 	(
-                        select :teacher_id teacher_id, :formatted_date as date,  hm.id ,  hm.hour_ampm , hm.hour_24 , 'Booked' status, c.member_slots, ce_count.count_member, ce.status as member_status, cs.type , cs.course_id
+                        select :teacher_id teacher_id, :formatted_date as date,  hm.id ,  hm.hour_ampm , hm.hour_24 , 'Booked' status, c.member_slots, c.name, ce_count.count_member, ce.status as member_status, cs.type , cs.course_id
                         from hour_mapping hm 
                         -- inner join dengan course_schedules, untuk memastikan hari dan jam nya match dengan query
                         inner join course_schedules as cs
@@ -798,7 +799,7 @@ def get_detail_teacher():
     
     query_list_group_courses = text("""
         select 
-            COALESCE (ce.total,0) current_join , c.name, c.description, c.type_class, c.status, c.member_slots, c.id, c.created_at, cs.total_class  
+            COALESCE (ce.total,0) current_join , c.name, c.description, c.type_class, c.status, c.member_slots, c.id as course_id, c.created_at, cs.total_class , COALESCE(ce.is_user_join, 0) is_user_join 
         from courses c
         inner join 
         (	select 
@@ -809,17 +810,23 @@ def get_detail_teacher():
         )	cs 
         on cs.course_id = c.id 
         left JOIN 
-        (   select 
-                DISTINCT count(user_id) as total , course_id from course_enrollments ce 
-            where is_deleted = 0
-            GROUP by course_id
+        (   SELECT 
+                COUNT(DISTINCT user_id) AS total,
+                course_id,
+                SUM(CASE 
+                    WHEN user_id = :user_id THEN 1
+                    ELSE 0
+                END) > 0 AS is_user_join
+            FROM course_enrollments ce
+            WHERE ce.is_deleted = 0
+            GROUP BY course_id
         ) ce
         on ce.course_id = c.id 
         where c.teacher_id = :teacher_id
             and c.type_class = 'Group'
             and c.is_deleted  = 0
     """)
-    result_list_group_courses = db_use.session.execute(query_list_group_courses, {"teacher_id": teacher_id}).mappings().fetchall()
+    result_list_group_courses = db_use.session.execute(query_list_group_courses, {"teacher_id": teacher_id, "user_id":user_id}).mappings().fetchall()
     
     # Convert RowMapping objects to dictionaries
     profile_data = dict(result_profile) if result_profile else None
@@ -862,8 +869,8 @@ def create_course_bystudent():
 
         # Insert into courses table
         insert_course_query = text("""
-            INSERT INTO courses (id, created_by, teacher_id, type_class, member_slots, name, description) 
-            VALUES (:id, :student_id, :teacher_id, :type_class, :member_slots, :name, :description)
+            INSERT INTO courses (id, created_by, teacher_id, type_class, member_slots, name, course_end_date, description) 
+            VALUES (:id, :student_id, :teacher_id, :type_class, :member_slots, :name, :course_end_date, :description)
         """)
         db_use.session.execute(insert_course_query, {
             "id":id,
@@ -872,6 +879,7 @@ def create_course_bystudent():
             "type_class" : type_class,
             "member_slots": member_slots,
             "name":name,
+            "course_end_date":date,
             "description": description
         })
         db_use.session.commit()
@@ -1040,8 +1048,8 @@ def create_custom_course():
         course_schedule = data.get('course_schedule')
         id = generate_time_short_uuid()
         
-        description = 'Group' # default private
-        type_class = 'Group' # default private
+        description = 'Group' # default value
+        type_class = 'Group' # default value
 
         if not all([name, teacher_id, member_slots, course_schedule]):
             return jsonify({
@@ -1069,12 +1077,18 @@ def create_custom_course():
 
         # Get the last inserted course_id
         course_id = id
+        latest_date = None
 
         for schedule in course_schedule:
             date = schedule.get('date')
             hour_id = schedule.get('hm_id')
             duration = schedule.get('duration')
             
+            if latest_date is None:
+                latest_date = date
+            elif latest_date < date:
+                latest_date = date
+
             # Insert the main scheduled entry
             insert_schedule_query = text("""
                 INSERT INTO course_schedules (course_id, date, hour_id, duration, type)
@@ -1101,19 +1115,17 @@ def create_custom_course():
                     "hour_id": hour_id + offset
                 })
         
-        
-        
+        # Update the course's course_end_date with the latest_date
+        update_course_query = text("""
+            UPDATE courses
+            SET course_end_date = :latest_date
+            WHERE id = :id
+        """)
+        db_use.session.execute(update_course_query, {
+            "id": course_id,
+            "latest_date": latest_date
+        })
 
-        ## Insert into course_enrollments table -- disable for now
-        # insert_enrollment_query = text("""
-        #     INSERT INTO course_enrollments (course_id, user_id, status)
-        #     VALUES (:course_id, :user_id, 'active')
-        # """)
-        # db_use.session.execute(insert_enrollment_query, {
-        #     "course_id": course_id,
-        #     "user_id": student_id
-        # })
-        
         # Commit the transaction after processing all schedules
         db_use.session.commit()
 
@@ -1267,12 +1279,18 @@ def join_course():
             }), 409
 
         # Check the current number of enrolled students
-        check_member_slots_query = text("""
-            SELECT COUNT(*) AS enrolled_count, c.member_slots
-            FROM course_enrollments ce
-            INNER JOIN courses c ON c.id = ce.course_id
-            WHERE ce.course_id = :course_id AND ce.is_deleted = 0
-            GROUP BY c.member_slots
+        check_member_slots_query = text("""            
+                select c.id, c.member_slots, COALESCE (ce.enrolled_count , 0) as enrolled_count
+                from courses c 
+                left join (
+                    SELECT COUNT(*) AS enrolled_count, course_id 
+                    FROM course_enrollments ce
+                    WHERE course_id = :course_id 
+                    AND is_deleted = 0
+                    GROUP by ce.course_id 
+                    ) ce
+                on ce.course_id = c.id 	
+                WHERE id = :course_id
         """)
         enrollment_result = db_use.session.execute(check_member_slots_query, {
             "course_id": course_id
