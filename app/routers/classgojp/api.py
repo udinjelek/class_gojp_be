@@ -13,7 +13,7 @@ from werkzeug.utils import secure_filename
 
 api_blueprint = Blueprint('auth', __name__)
 address_storage = 'https://classgojp-file.polaris.my.id/'
-upload_path = '/public_html/classgojp/'
+upload_path = '../public_html/classgojp/'
 folder_profil_pic = 'images/users/'
 
 # Function to generate a shortened UUID
@@ -1430,11 +1430,21 @@ def upload_profile_pic():
         
         # Sanitize the file name and save the file
         filename = secure_filename(file_name)
-        save_path = os.path.join(upload_path , folder_profil_pic, user_id, '_', filename)
+        save_path = os.path.join(upload_path, folder_profil_pic, user_id + '_' + filename)
         file.save(save_path)
         
         # Generate the file URL
-        file_url = f"{address_storage}{folder_profil_pic}{user_id}{'_'}{filename}"
+        profile_pic_path = f"{folder_profil_pic}{user_id + '_' + filename}"
+        file_url = f"{address_storage}{profile_pic_path}"
+        
+        # Update the database
+        update_query = text("""
+            UPDATE users
+            SET profile_pic = :profile_pic
+            WHERE user_id = :user_id
+        """)
+        db_use.session.execute(update_query, {"profile_pic": profile_pic_path, "user_id": user_id})
+        db_use.session.commit()
         
         return jsonify({
             "status": True,
@@ -1445,6 +1455,169 @@ def upload_profile_pic():
             }
         })
     except Exception as e:
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+    
+@api_blueprint.route('/update_profile', methods=['POST'])
+def update_profile():
+    try:
+        # Parse JSON data from the request
+        user_data = request.json.get('user_data', {})
+
+        # Ensure `user_id` is present in the user_data
+        user_id = user_data.get('user_id')
+        if not user_id:
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing user_id in request",
+                "data": None
+            }), 400
+
+        # Extract data with default values
+        full_name = user_data.get('full_name', '')
+        email = user_data.get('email', '')
+        phone_number = user_data.get('phone_number', '')
+        location = user_data.get('location', '')
+        description = user_data.get('description', '')
+        about = user_data.get('about', '')
+        testimonial = user_data.get('testimonial', '')
+        message = user_data.get('message', '')
+
+        # Update `users` table
+        users_update_query = text("""
+            UPDATE users
+            SET full_name = :full_name,
+                email = :email,
+                phone_number = :phone_number
+            WHERE user_id = :user_id
+        """)
+        db_use.session.execute(users_update_query, {
+            "full_name": full_name,
+            "email": email,
+            "phone_number": phone_number,
+            "user_id": user_id
+        })
+
+        # Update `user_profiles` table
+        user_profiles_update_query = text("""
+            UPDATE user_profiles
+            SET location = :location,
+                description = :description,
+                about = :about,
+                testimonial = :testimonial,
+                message = :message
+            WHERE user_id = :user_id
+        """)
+        db_use.session.execute(user_profiles_update_query, {
+            "location": location,
+            "description": description,
+            "about": about,
+            "testimonial": testimonial,
+            "message": message,
+            "user_id": user_id
+        })
+
+        # Commit changes
+        db_use.session.commit()
+
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Profile updated successfully",
+            "data": None
+        })
+    except Exception as e:
+        # Rollback changes if an error occurs
+        db_use.session.rollback()
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+
+@api_blueprint.route('/update_password', methods=['POST'])
+def update_password():
+    try:
+        # Parse request JSON data
+        data = request.json
+        user_id = data.get('user_id')
+        passwords_current = data.get('passwords_current', '')
+        passwords_new = data.get('passwords_new', '')
+        passwords_confirm = data.get('passwords_confirm', '')
+
+        # Check for missing parameters
+        if not user_id or not passwords_current or not passwords_new or not passwords_confirm:
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+
+        # Validate that the new password and confirmation match
+        if passwords_new != passwords_confirm:
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "New password and confirmation do not match",
+                "data": None
+            }), 400
+
+        # Retrieve the current user and validate their current password
+        user_query = text("SELECT password FROM users WHERE user_id = :user_id")
+        user_result = db_use.session.execute(user_query, {"user_id": user_id}).mappings().fetchone()
+
+        if not user_result:
+            return jsonify({
+                "status": False,
+                "status_code": 404,
+                "message": "User not found",
+                "data": None
+            }), 404
+
+        # Check if the current password matches the hash in the database
+        db_hashed_password = user_result['password']
+        input_hashed_password = hash_password_md5(passwords_current)
+
+        if not (input_hashed_password == db_hashed_password):
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Current password is incorrect",
+                "data": None
+            }), 400
+
+        new_hashed_password =  hash_password_md5(passwords_confirm)
+        # Update the user's password in the database
+        update_password_query = text("""
+            UPDATE users 
+            SET password = :new_password 
+            WHERE user_id = :user_id
+        """)
+        db_use.session.execute(update_password_query, {
+            "new_password": new_hashed_password,
+            "user_id": user_id
+        })
+
+        # Commit the changes
+        db_use.session.commit()
+
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Password updated successfully",
+            "data": None
+        })
+
+    except Exception as e:
+        # Rollback in case of an error
+        db_use.session.rollback()
         return jsonify({
             "status": False,
             "status_code": 500,
