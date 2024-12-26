@@ -2,16 +2,19 @@ import uuid
 import hashlib
 import random
 import time
+import os
 from flask import Blueprint, request, jsonify
 from flask_mail import Message
 from app.mail import mail
 from sqlalchemy import text
 from db import db_use  # Import SQLAlchemy instance
 from datetime import datetime
+from werkzeug.utils import secure_filename
 
 api_blueprint = Blueprint('auth', __name__)
 address_storage = 'https://classgojp-file.polaris.my.id/'
-
+upload_path = '/public_html/classgojp/'
+folder_profil_pic = 'images/users/'
 
 # Function to generate a shortened UUID
 def generate_short_uuid():
@@ -537,7 +540,7 @@ def get_schedule_user():
 
     # Query the database for the schedule
     query = text("""
-        -- Query 1: For "learning with sensai" (student perspective)
+        -- Query 1: For "learning with Sensei" (student perspective)
         SELECT 
             DATE_FORMAT(cs.date, '%Y-%m-%d')  AS schedule_date,
             hm.hour_ampm AS schedule_hour,
@@ -551,7 +554,7 @@ def get_schedule_user():
             c.id as course_id,
             u.full_name as teacher_name,
             concat( :address_storage , u.profile_pic) as teacher_profile_pic,
-            'Learning with Sensai' AS criteria
+            'Learning with Sensei' AS criteria
         FROM course_enrollments ce
         JOIN courses c ON c.id = ce.course_id
         JOIN course_schedules cs ON cs.course_id = c.id
@@ -1331,6 +1334,117 @@ def join_course():
 
     except Exception as e:
         db_use.session.rollback()
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+
+@api_blueprint.route('/get_detail_self', methods=['GET'])
+def get_detail_self():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Missing required parameters",
+            "data": None
+        }), 400
+    
+    try:
+        selfData_query = text("""
+            SELECT 
+                u.user_id, 
+                u.full_name, 
+                u.email, 
+                u.role, 
+                u.phone_number, 
+                CONCAT(:address_storage, profile_pic) AS profile_pic,
+                up.location, 
+                up.description, 
+                up.about, 
+                up.testimonial, 
+                up.message
+            FROM users u
+            LEFT JOIN user_profiles up 
+            ON up.user_id = u.user_id 
+            WHERE u.user_id = :user_id
+        """)
+        
+        result = db_use.session.execute(
+            selfData_query, 
+            {"user_id": user_id, "address_storage": address_storage}
+        ).mappings().fetchone()
+        
+        # The result is already a dictionary or None
+        self_detail = dict(result) if result else {}
+
+        # Return response
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Self details retrieved successfully",
+            "data": self_detail
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+
+@api_blueprint.route('/upload-profile-pic', methods=['POST'])
+def upload_profile_pic():
+    try:
+        user_id = request.form.get('user_id')
+        file_name = request.form.get('file_name')
+        
+        if not user_id or not file_name:
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "Missing required parameters",
+                "data": None
+            }), 400
+        
+        # Ensure a file is included in the request
+        if 'file' not in request.files:
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "No file provided",
+                "data": None
+            }), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({
+                "status": False,
+                "status_code": 400,
+                "message": "No file selected",
+                "data": None
+            }), 400
+        
+        # Sanitize the file name and save the file
+        filename = secure_filename(file_name)
+        save_path = os.path.join(upload_path , folder_profil_pic, user_id, '_', filename)
+        file.save(save_path)
+        
+        # Generate the file URL
+        file_url = f"{address_storage}{folder_profil_pic}{user_id}{'_'}{filename}"
+        
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Profile picture uploaded successfully",
+            "data": {
+                "file_url": file_url
+            }
+        })
+    except Exception as e:
         return jsonify({
             "status": False,
             "status_code": 500,
