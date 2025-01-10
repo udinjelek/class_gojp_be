@@ -28,15 +28,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = Config.SQLALCHEMY_TRACK_MODIFICAT
 db_use.init_app(app)  # Initialize the SQLAlchemy instance with the Flask app
 
 # Define CORS settings
-CORS(app, resources={r"/classgojp/*": {"origins": [
-    "http://localhost:4001",
-    "http://127.0.0.1:4001",
-    "http://localhost:4200",
-    "http://127.0.0.1:4200",
-    "http://localhost:4201",
-    "http://127.0.0.1:4201",
-    "https://class-gojp.polaris.my.id",
-]}})
+CORS(app, resources=app.config['CORS_SETTINGS'])
+
 
 # Register Blueprints
 app.register_blueprint(api_classgojp, url_prefix='/classgojp')  # Register the auth Blueprint
