@@ -10,9 +10,11 @@ from sqlalchemy import text
 from db import db_use  # Import SQLAlchemy instance
 from datetime import datetime
 from werkzeug.utils import secure_filename
+from config import Config  # Absolute import
+
 
 api_blueprint = Blueprint('auth', __name__)
-address_storage = 'https://classgojp-file.polaris.my.id/'
+address_storage = Config.ADDRESS_STORAGE
 upload_path = '../public_html/classgojp/'
 folder_profil_pic = 'images/users/'
 

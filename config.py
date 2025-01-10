@@ -17,3 +17,6 @@ class Config:
             ]
         }
     }
+
+    ADDRESS_STORAGE = 'https://classgojp-file.polaris.my.id/'
+    # ADDRESS_STORAGE = 'https://classgojpfile.tomodachi.my.id/'
