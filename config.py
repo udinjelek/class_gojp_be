@@ -20,3 +20,6 @@ class Config:
 
     ADDRESS_STORAGE = 'https://classgojp-file.polaris.my.id/'
     # ADDRESS_STORAGE = 'https://classgojpfile.tomodachi.my.id/'
+
+    UPLOAD_PATH = '../public_html/classgojp/' 
+    # UPLOAD_PATH = '../public_html/classgojpfile/' 

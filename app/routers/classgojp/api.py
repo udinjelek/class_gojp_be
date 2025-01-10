@@ -15,7 +15,7 @@ from config import Config  # Absolute import
 
 api_blueprint = Blueprint('auth', __name__)
 address_storage = Config.ADDRESS_STORAGE
-upload_path = '../public_html/classgojp/'
+upload_path = Config.UPLOAD_PATH
 folder_profil_pic = 'images/users/'
 
 # Function to generate a shortened UUID
