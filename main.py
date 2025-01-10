@@ -7,7 +7,7 @@ from db import db_use  # Import the SQLAlchemy instance
 from app.mail import mail
 
 app = Flask(__name__)
-
+app.config.from_object(Config)
 app.config['MAIL_SERVER'] = 'mail.polaris.my.id'
 # app.config['MAIL_PORT'] = 465
 # app.config['MAIL_USE_TLS'] = False
