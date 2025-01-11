@@ -1627,3 +1627,223 @@ def update_password():
             "message": f"An error occurred: {str(e)}",
             "data": None
         }), 500
+    
+@api_blueprint.route('/get_search_users', methods=['GET'])
+def get_search_users():
+    search_name = request.args.get('search_name', '')
+    page_select = int(request.args.get('page_select', 1))
+    page_size = 10
+
+    # Default condition when no search term is provided
+    if search_name == '':
+        search_condition = ""
+        params = {}
+    else:
+        search_condition = "AND LOWER(concat(full_name, email)) LIKE LOWER(:search_name)"
+        params = {'search_name': f'%{search_name}%'}
+
+    # Calculate offset for pagination
+    offset = (page_select - 1) * page_size
+
+    # Prepare the SQL query with dynamic search_condition for the main query
+    query = f"""
+        SELECT user_id, full_name, email, role, concat( :address_storage ,profile_pic) as profile_pic,
+               is_active, is_deleted, status_account 
+        FROM users
+        WHERE role != "admin"
+        {search_condition}
+        ORDER BY full_name
+        LIMIT :page_size OFFSET :offset
+    """
+
+    # Combine the parameters for search_name, page_size, and offset
+    params.update({"page_size": page_size, "offset": offset, "address_storage": address_storage})
+
+    try:
+        # Execute the main query to fetch the paginated data
+        search_query = text(query)
+        result = db_use.session.execute(search_query, params).mappings().all()
+
+        # Format the result into a list of dictionaries
+        search_result = [dict(row) for row in result] if result else []
+
+        # Now, fetch the total count of records matching the search condition (without LIMIT and OFFSET)
+        count_query = f"""
+            SELECT COUNT(*) 
+            FROM users 
+            WHERE role != "admin"
+            {search_condition}
+        """
+        total_count = db_use.session.execute(text(count_query), params).scalar()
+
+        # Calculate the total_pages
+        total_pages = (total_count // page_size) + (1 if total_count % page_size > 0 else 0)
+
+        # Return the response including the new fields
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Search Users",
+            "data": {
+                "user_list": search_result,
+                "total_count": total_count,
+                "total_pages": total_pages
+            }
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+    
+@api_blueprint.route('/get_data_user', methods=['GET'])
+def get_data_user():
+    target_id = request.args.get('target_id', '')
+    user_id = request.args.get('user_id', '')
+    
+    if not user_id or not target_id:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Missing required parameters",
+            "data": None
+        }), 400
+    
+    # Query to get the role of the user by user_id
+    role_query = text("""
+        SELECT role FROM users WHERE user_id = :user_id
+    """)
+    
+    try:
+        # Execute the query to get the role
+        result = db_use.session.execute(role_query, {"user_id": user_id}).fetchone()
+        
+        if result is None:
+            return jsonify({
+                "status": False,
+                "status_code": 404,
+                "message": "User not found",
+                "data": None
+            }), 404
+
+        role = result[0]  # The role should be the first column in the result
+
+        # Check if the role is 'admin' or user_id is the same as target_id
+        if role != 'admin' and user_id != target_id:
+            return jsonify({
+                "status": False,
+                "status_code": 403,
+                "message": "Unauthorized: You do not have permission to access this data",
+                "data": None
+            }), 403
+
+        # If authorized, fetch the target user's data
+        target_user_query = text("""
+            SELECT users.user_id, full_name, concat( :address_storage ,profile_pic) as profile_pic, role , email, phone_number, location
+            FROM users 
+            left join user_profiles
+            on user_profiles.user_id = users.user_id
+            WHERE users.user_id = :target_id
+        """)
+        target_user_result = db_use.session.execute(target_user_query, {"target_id": target_id , "address_storage": address_storage }).mappings().fetchone()
+        
+        if target_user_result is None:
+            return jsonify({
+                "status": False,
+                "status_code": 404,
+                "message": "Target user not found",
+                "data": None
+            }), 404
+
+        # Convert RowMapping object to a standard dictionary
+        target_user_data = dict(target_user_result) if target_user_result else {}
+
+        # Return the target user data as JSON
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "User data retrieved successfully",
+            "data": target_user_data
+        })
+    
+    except Exception as e:
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
+    
+@api_blueprint.route("/set_invert_role", methods=["POST"])
+def set_invert_role():
+    data = request.get_json()
+    target_id = data.get("target_id")
+    user_id = data.get("user_id")
+
+    if not user_id or not target_id:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Missing required parameters",
+            "data": None
+        }), 400
+    
+    try:
+          # Query to get the role of the user by user_id
+        role_query = text("""SELECT role FROM users WHERE user_id = :user_id""")
+        # Execute the query to get the role
+        result = db_use.session.execute(role_query, {"user_id": user_id}).fetchone()
+        
+        if result is None:
+            return jsonify({
+                "status": False,
+                "status_code": 404,
+                "message": "User not found",
+                "data": None
+            }), 404
+
+        role = result[0]  # The role should be the first column in the result
+
+        # Check if the role is 'admin' or user_id is the same as target_id
+        if role != 'admin':
+            return jsonify({
+                "status": False,
+                "status_code": 403,
+                "message": "Unauthorized: You do not have permission to access this data",
+                "data": None
+            }), 403
+        
+        # Update role using CASE WHEN
+        update_query = text("""
+            UPDATE users
+            SET role = CASE
+                WHEN role = 'student' THEN 'teacher'
+                WHEN role = 'teacher' THEN 'student'
+                ELSE role
+            END
+            WHERE user_id = :target_id
+            AND role IN ('student', 'teacher')
+        """)
+        
+        # Execute the update query
+        db_use.session.execute(update_query, {"target_id": target_id})
+        db_use.session.commit()
+        
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "User role updated successfully",
+            "data": None
+        })
+
+    except Exception as e:
+        db_use.session.rollback()  # Rollback in case of any error
+        return jsonify({
+            "status": False,
+            "status_code": 500,
+            "message": f"An error occurred: {str(e)}",
+            "data": None
+        }), 500
