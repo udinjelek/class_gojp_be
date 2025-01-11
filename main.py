@@ -28,7 +28,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = Config.SQLALCHEMY_TRACK_MODIFICAT
 db_use.init_app(app)  # Initialize the SQLAlchemy instance with the Flask app
 
 # Define CORS settings
-CORS(app, resources=app.config['CORS_SETTINGS'])
+CORS(app, resources=Config.CORS_SETTINGS)
 
 
 # Register Blueprints

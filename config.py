@@ -8,20 +8,20 @@ class Config:
     CORS_SETTINGS = {
         r"/classgojp/*": {
             "origins": [
-                "http://localhost:4001",
-                "http://127.0.0.1:4001",
+                # "http://localhost:4001",
+                # "http://127.0.0.1:4001",
                 "http://localhost:4200",
                 "http://127.0.0.1:4200",
-                "http://localhost:4201",
-                "http://127.0.0.1:4201",
-                "https://class-gojp.polaris.my.id",
+                # "http://localhost:4201",
+                # "http://127.0.0.1:4201",
+                # "https://class-gojp.polaris.my.id",
                 "https://nihongo.tomodachi.my.id",
             ]
         }
     }
 
-    ADDRESS_STORAGE = 'https://classgojp-file.polaris.my.id/'
-    # ADDRESS_STORAGE = 'https://classgojpfile.tomodachi.my.id/'
+    # ADDRESS_STORAGE = 'https://classgojp-file.polaris.my.id/'
+    ADDRESS_STORAGE = 'https://classgojpfile.tomodachi.my.id/'
 
-    UPLOAD_PATH = '../public_html/classgojp/' 
-    # UPLOAD_PATH = '../public_html/classgojpfile/' 
+    # UPLOAD_PATH = '../public_html/classgojp/' 
+    UPLOAD_PATH = '../public_html/classgojpfile/' 

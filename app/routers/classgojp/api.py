@@ -88,7 +88,7 @@ def create_user():
         "password": hashed_password,
         "profile_pic": profile_pic
     })
-    db_use.session.commit()
+    
 
     # Insert the new user's profile into the user_profiles table
     insert_user_profile_query = text("""
@@ -104,7 +104,8 @@ def create_user():
         text("SELECT user_id, full_name, concat( :address_storage ,profile_pic) as profile_pic, role FROM users WHERE user_id = :user_id"),
         {"user_id": user_id, "address_storage": address_storage}
     ).mappings().fetchone()
-
+    
+    db_use.session.commit()
     # Convert result to a dictionary and return JSON response
     return jsonify({
         "status": True,
