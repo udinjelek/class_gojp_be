@@ -3,7 +3,7 @@ import hashlib
 import random
 import time
 import os
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_mail import Message
 from app.mail import mail
 from sqlalchemy import text
@@ -11,7 +11,7 @@ from db import db_use  # Import SQLAlchemy instance
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from config import Config  # Absolute import
-
+from datetime import datetime, timedelta
 
 api_blueprint = Blueprint('auth', __name__)
 address_storage = Config.ADDRESS_STORAGE
@@ -145,6 +145,207 @@ def user_login():
             "message": "Invalid email or password",
             "data": None
         }), 401
+
+
+@api_blueprint.route('/request_reset_password', methods=['POST'])
+def request_reset_password():
+    data = request.get_json()
+    email = data.get('email')
+
+    # Check if the email already exists in the database
+    check_email_query = text("SELECT * FROM users WHERE email = :email")
+    existing_user = db_use.session.execute(check_email_query, {"email": email}).mappings().fetchone()
+
+    if not existing_user:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Account not found",
+            "data": None
+        }), 400  # Return a 400 status code for existing email
+
+    user_id = existing_user['user_id']
+    user_email = existing_user['email']
+    # Check if a reset token already exists for the user
+    check_password_reset_tokens_query = text("SELECT * FROM password_reset_tokens WHERE user_id = :user_id")
+    existing_password_reset_tokens = db_use.session.execute(check_password_reset_tokens_query, {"user_id": user_id}).mappings().fetchone()
+
+    if not existing_password_reset_tokens:
+        # If no reset token exists, generate a new token and insert it into the database
+        token_id = user_id + '-' + generate_short_uuid()  # Generate a new unique token
+
+        # Calculate the token expiry date (1 day from now)
+        token_expiry = datetime.now() + timedelta(days=1)
+
+        # Insert the new password reset token into the database
+        insert_token_query = text("""
+            INSERT INTO password_reset_tokens (reset_token, user_id, token_expiry, created_at, used)
+            VALUES (:reset_token, :user_id, :token_expiry, NOW(), FALSE)
+        """)
+        db_use.session.execute(insert_token_query, {
+            "reset_token": token_id,
+            "user_id": user_id,
+            "token_expiry": token_expiry
+        })
+        db_use.session.commit()  # Commit the transaction
+        send_email_reset_password([user_email],token_id)
+        return jsonify({
+            "status": True,
+            "status_code": 200,
+            "message": "Password reset token generated successfully",
+            "data": {"reset_token": token_id}
+        }), 200
+
+    else:
+        
+        # If a token exists, check if it's already used or expired
+        if existing_password_reset_tokens['used'] or existing_password_reset_tokens['token_expiry'] < datetime.now():
+            # Token is used or expired, generate a new one and update the existing record
+            token_id = user_id + '-' + generate_short_uuid()  # Generate a new unique token
+
+            # Calculate the new token expiry date
+            token_expiry = datetime.now() + timedelta(days=1)
+
+            # Update the existing token record
+            update_token_query = text("""
+                UPDATE password_reset_tokens
+                SET reset_token = :reset_token, token_expiry = :token_expiry, used = FALSE, created_at = NOW()
+                WHERE user_id = :user_id
+            """)
+            db_use.session.execute(update_token_query, {
+                "reset_token": token_id,
+                "user_id": user_id,
+                "token_expiry": token_expiry
+            })
+            db_use.session.commit()  # Commit the transaction
+            send_email_reset_password([user_email],token_id)
+            return jsonify({
+                "status": True,
+                "status_code": 200,
+                "message": "Password reset token updated successfully",
+                "data": {"reset_token": token_id}
+            }), 200
+
+        else:
+            token_id = existing_password_reset_tokens['reset_token']
+            # The token is still valid and unused
+            send_email_reset_password([user_email],token_id)
+            return jsonify({
+                "status": True,
+                "status_code": 200,
+                "message": "A password reset token already exists and is still valid",
+                "data": None
+            }), 200
+
+@api_blueprint.route('/reset_password', methods=['POST'])
+def reset_password():
+    data = request.get_json()
+    token_id = data.get('token_id')
+    password_new = data.get('password_new')
+    password_confirm = data.get('password_confirm')
+
+    # Step 1: Check if password_new and password_confirm match
+    if password_new != password_confirm:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Passwords do not match",
+            "data": None
+        }), 400
+
+    # Step 2: Check if reset token exists in the password_reset_tokens table
+    check_token_query = text("SELECT * FROM password_reset_tokens WHERE reset_token = :reset_token")
+    existing_token = db_use.session.execute(check_token_query, {"reset_token": token_id}).mappings().fetchone()
+
+    if not existing_token:
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Invalid reset token",
+            "data": None
+        }), 400
+
+    # Step 3: Check if the token has expired or already been used
+    if existing_token['used'] or existing_token['token_expiry'] < datetime.now():
+        return jsonify({
+            "status": False,
+            "status_code": 400,
+            "message": "Reset token has expired or already used. Please request a new password reset.",
+            "data": None
+        }), 400
+
+    # Step 4: Token is valid, extract user_id from the token
+    user_id = existing_token['user_id']
+
+    # Step 5: Hash the new password before storing it in the database
+    hashed_password = hash_password_md5(password_new)
+
+    # Step 6: Update the password in the users table for the given user_id
+    update_password_query = text("""
+        UPDATE users
+        SET password = :hashed_password
+        WHERE user_id = :user_id
+    """)
+    db_use.session.execute(update_password_query, {
+        "hashed_password": hashed_password,
+        "user_id": user_id
+    })
+    db_use.session.commit()
+
+    # Step 7: Mark the token as used (since the password has been successfully reset)
+    update_token_used_query = text("""
+        UPDATE password_reset_tokens
+        SET used = TRUE
+        WHERE reset_token = :reset_token
+    """)
+    db_use.session.execute(update_token_used_query, {"reset_token": token_id})
+    db_use.session.commit()
+
+    # Step 8: Return a success response
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "Password reset successfully",
+        "data": None
+    }), 200
+
+@api_blueprint.route('/get_valid_reset_password', methods=['GET'])
+def get_valid_reset_password():
+    token_id = request.args.get('token_id')
+    
+    # Check if reset token exists in the password_reset_tokens table
+    check_token_query = text("SELECT * FROM password_reset_tokens WHERE reset_token = :reset_token")
+    existing_token = db_use.session.execute(check_token_query, {"reset_token": token_id}).mappings().fetchone()
+    
+    if not existing_token:
+        return jsonify({
+            "status": False,
+            "status_code": 200,
+            "message": "Access Denied: You do not have permission to view this page.",
+            "data": None
+        }), 200
+
+    # Step 3: Check if the token has expired or already been used
+    if existing_token['used'] or existing_token['token_expiry'] < datetime.now():
+        return jsonify({
+            "status": False,
+            "status_code": 200,
+            "message": "Reset token has expired or already used. Please request a new password reset.",
+            "data": None
+        }), 200
+
+    user_id = existing_token['user_id']
+    user_query = text("SELECT full_name, email FROM users WHERE user_id = :user_id")
+    result_user_data = db_use.session.execute(user_query, {"user_id": user_id}).mappings().fetchone()
+
+    result_user_dict =  dict(result_user_data) if result_user_data else None
+    # Step 8: Return a success response
+    return jsonify({
+        "status": True,
+        "status_code": 200,
+        "message": "reset token valid",
+        "data": result_user_dict
+    }), 200
 
 # Test route for database
 @api_blueprint.route('/testdb', methods=['GET'])
@@ -1847,3 +2048,97 @@ def set_invert_role():
             "message": f"An error occurred: {str(e)}",
             "data": None
         }), 500
+
+
+def send_email_reset_password(params_recipients, params_tokenResetPassword):
+    try:
+        tokenResetPassword = params_tokenResetPassword
+        frontend_url = current_app.config['FRONTEND_URL']
+        reset_link = f"{frontend_url}reset-password/{tokenResetPassword}"
+
+        msg = Message(
+            subject='Reset Your Password',
+            sender=current_app.config['MAIL_DEFAULT_SENDER'],
+            recipients=params_recipients,
+            html=f"""
+                    <!DOCTYPE html>
+                    <html lang="en">
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>Reset Your Password</title>
+                        <style>
+                            body {{
+                                font-family: Arial, sans-serif;
+                                background-color: #f4f4f4;
+                                margin: 0;
+                                padding: 0;
+                            }}
+                            .container {{
+                                width: 100%;
+                                max-width: 600px;
+                                margin: 0 auto;
+                                background-color: #ffffff;
+                                border-radius: 8px;
+                                overflow: hidden;
+                                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+                            }}
+                            .header {{
+                                background-color: #2c3e50;
+                                color: white;
+                                padding: 20px;
+                                text-align: center;
+                            }}
+                            .content {{
+                                padding: 20px;
+                                color: #333333;
+                            }}
+                            .button {{
+                                background-color: #3498db;
+                                color: white !important;  /* Ensure the text stays white */
+                                text-decoration: none;
+                                padding: 12px 20px;
+                                border-radius: 4px;
+                                display: inline-block;
+                                margin-top: 20px;
+                                font-weight: bold;
+                                border: none;
+                                text-align: center;
+                            }}
+                            .footer {{
+                                text-align: center;
+                                padding: 20px;
+                                font-size: 12px;
+                                color: #777777;
+                            }}
+                            .footer a {{
+                                color: #3498db;
+                            }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="container">
+                            <div class="header">
+                                <h1>Password Reset Request</h1>
+                            </div>
+                            <div class="content">
+                                <p>Hi there,</p>
+                                <p>We received a request to reset your password for your account. If you did not request a password reset, please ignore this email.</p>
+                                <p>To reset your password, click the button below:</p>
+                                <a href="{reset_link}" class="button">Reset My Password</a>
+                                <p>If you have any issues, feel free to contact our support team.</p>
+                                <p>Best regards, <br>IT Care Team</p>
+                            </div>
+                            <div class="footer">
+                                <p>If you did not request a password reset, you can safely ignore this email. <br>For more help, visit <a href="https://google.com">our support page</a>.</p>
+                            </div>
+                        </div>
+                    </body>
+                    </html>
+                """
+        )
+        mail.send(msg)
+        return 'Email sent successfully!'
+    except Exception as e:
+        print(f'Error: {e}')
+        return str(e), 500
